@@ -1,0 +1,517 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Shared Test Template
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        type: string
+        required: true
+      language:
+        type: string
+        required: true        # go | node | python
+      coverage_root:
+        type: string
+        required: false
+        default: src
+      debug:
+        type: string
+        required: false
+        default: "false"
+      enable_smart_tests:
+        type: string
+        required: false
+        default: "false"
+        description: "Enable CloudBees Smart Tests integration (requires LAUNCHABLE_TOKEN secret)"
+      fetch_depth:
+        type: number
+        required: false
+        default: 0
+        description: "Number of commits to fetch (0 = all history). Full history recommended for Smart Tests to analyze commits and provide accurate test predictions."
+    outputs:
+      CODE_COVERAGE:
+        value: ${{ jobs.test.outputs.CODE_COVERAGE }}
+      TEST_SUMMARY:
+        value: ${{ jobs.test.outputs.TEST_SUMMARY }}
+      SMART_TESTS_BUILD_NAME:
+        value: ${{ jobs.test.outputs.SMART_TESTS_BUILD_NAME }}
+
+jobs:
+  test:
+    # Expose a single normalized output to callers
+    outputs:
+      CODE_COVERAGE: ${{ steps.ChooseCoverage.outputs.CODE_COVERAGE }}
+      TEST_SUMMARY: ${{ steps.ChooseCoverage.outputs.TEST_SUMMARY }}
+      SMART_TESTS_BUILD_NAME: ${{ steps.ChooseCoverage.outputs.SMART_TESTS_BUILD_NAME }}
+    steps:
+      - name: Checkout source
+        uses: cloudbees-io/checkout@v2
+        with:
+          fetch-depth: ${{ inputs.fetch_depth }}
+
+      # ----------------------- GO -----------------------
+      - name: Run Go tests
+        if: ${{ inputs.language == 'go' }}
+        id: GoTests
+        kind: test
+        uses: docker://golang:1.24-alpine
+        env:
+          CI: "true"
+          DEBUG: ${{ inputs.debug }}
+          # >>> CloudBees Smart Tests integration <<<
+          APP_NAME: ${{ inputs.app_name }}
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+          CLOUDBEES_BUILD_ID: ${{ cloudbees.run_id }}
+        run: |
+          set -eu
+          apk add --no-cache git curl libxml2-utils
+          go install github.com/jstemmer/go-junit-report/v2@latest
+
+          # ========== CloudBees Smart Tests Integration START ==========
+          # Install Launchable CLI (optional, only if enabled and token provided)
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Installing CloudBees Smart Tests CLI ==="
+            apk add --no-cache python3 py3-pip openjdk17-jre-headless || {
+              echo "Warning: Dependencies installation failed, continuing without Smart Tests"
+              unset LAUNCHABLE_TOKEN
+            }
+            if [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+              pip3 install launchable --break-system-packages || {
+                echo "Warning: Launchable CLI install failed, continuing without Smart Tests"
+                unset LAUNCHABLE_TOKEN
+              }
+            fi
+          fi
+
+          # Record build to Smart Tests
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Recording build to Smart Tests ==="
+            SMART_TESTS_BUILD_NAME="cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
+            printf '%s' "$SMART_TESTS_BUILD_NAME" > /tmp/smart_tests_build_name.txt
+            launchable record build --name "$SMART_TESTS_BUILD_NAME" || {
+              echo "Warning: Build recording failed, continuing without Smart Tests"
+              unset LAUNCHABLE_TOKEN
+            }
+          fi
+
+          # Create test session
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Creating Smart Tests session ==="
+            launchable record session --build "cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
+              echo "Warning: Session creation failed, running all tests"
+              unset LAUNCHABLE_TOKEN
+            }
+          fi
+
+          # Get test subset
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Getting Smart Tests subset ==="
+            # Generate list of all Go test files and pipe to subset command
+            find . -type f -name "*_test.go" | \
+              launchable subset --session "$(cat /tmp/launchable-session.txt)" file > /tmp/launchable-subset.txt || {
+              echo "Warning: Subset generation failed, running all tests"
+              rm -f /tmp/launchable-subset.txt
+            }
+
+            if [ -s /tmp/launchable-subset.txt ]; then
+              echo "=== Smart Tests subset generated ==="
+              cat /tmp/launchable-subset.txt
+            fi
+          fi
+          # ========== CloudBees Smart Tests Integration END ==========
+
+          set +e
+          set -o pipefail
+
+          # Run tests (subset or all)
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ] && [ -s /tmp/launchable-subset.txt ]; then
+            echo "=== Running Smart Tests subset ==="
+            # Convert file list to Go package paths for testing
+            # For each test file, get its directory and prefix with ./ (but handle root . specially)
+            SUBSET_PACKAGES=$(cat /tmp/launchable-subset.txt | while read f; do
+              dir=$(dirname "$f")
+              if [ "$dir" = "." ]; then
+                echo "."
+              else
+                echo "./$dir"
+              fi
+            done | sort -u | paste -sd ' ' -)
+            go test ${SUBSET_PACKAGES} -v -coverprofile=coverage.out 2>&1 | tee test_stdout.txt
+          else
+            echo "=== Running all tests (Smart Tests not active) ==="
+            go test ./... -v -coverprofile=coverage.out 2>&1 | tee test_stdout.txt
+          fi
+          STATUS=$?
+          set +o pipefail
+          set -e
+
+          # Convert JSON output to JUnit XML
+          "$(go env GOPATH)"/bin/go-junit-report -set-exit-code < test_stdout.txt > junit.xml || true
+
+          # Add file attributes to JUnit XML for Smart Tests file profile (using awk instead of Python)
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ] && [ -f junit.xml ] && [ -s /tmp/launchable-subset.txt ]; then
+            echo "=== Adding file attributes to JUnit XML ==="
+            # Build package->file mapping
+            while read test_file; do
+              pkg_dir=$(dirname "$test_file" | sed 's|^\./||')
+              if [ "$pkg_dir" = "." ]; then
+                pkg_name="${APP_NAME}"
+              else
+                pkg_name="${APP_NAME}/$pkg_dir"
+              fi
+              # Use xmllint to add file attribute to matching testsuite (only once per package)
+              if ! grep -q "<testsuite.*name=\"$pkg_name\".*file=" junit.xml; then
+                sed -i.bak "s|<testsuite name=\"$pkg_name\"|<testsuite name=\"$pkg_name\" file=\"$test_file\"|" junit.xml
+              fi
+            done < /tmp/launchable-subset.txt
+            rm -f junit.xml.bak
+          fi
+
+          # Record test results to Smart Tests
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ] && [ -f junit.xml ]; then
+            echo "=== Recording test results to Smart Tests ==="
+            launchable record tests --session "$(cat /tmp/launchable-session.txt)" file junit.xml || {
+              echo "Warning: Test result recording failed"
+            }
+          fi
+
+          # Parse test results from JUnit XML
+          if [ -f junit.xml ]; then
+            TOTAL=$(xmllint --xpath "count(//testcase)" junit.xml 2>/dev/null || echo "0")
+            FAILED=$(xmllint --xpath "count(//testcase/failure)" junit.xml 2>/dev/null || echo "0")
+            ERRORS=$(xmllint --xpath "count(//testcase/error)" junit.xml 2>/dev/null || echo "0")
+            SKIPPED=$(xmllint --xpath "count(//testcase/skipped)" junit.xml 2>/dev/null || echo "0")
+            PASSED=$((TOTAL - FAILED - ERRORS - SKIPPED))
+
+            {
+              echo "**Tests Run:** $TOTAL"
+              echo "**Passed:** $PASSED"
+              echo "**Failed:** $FAILED"
+              echo "**Errors:** $ERRORS"
+              echo "**Skipped:** $SKIPPED"
+            } > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          else
+            echo "No test results available" > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          fi
+
+          if [ -f coverage.out ]; then
+            go tool cover -func=coverage.out > coverage_summary.txt
+            { echo '```'; cat coverage_summary.txt; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          else
+            { echo '```'; echo '(no coverage output captured)'; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          fi
+
+          # Output Smart Tests build name if it was set
+          if [ -f /tmp/smart_tests_build_name.txt ]; then
+            printf '%s' "$(cat /tmp/smart_tests_build_name.txt)" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          else
+            printf '%s' "" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          fi
+
+          exit $STATUS
+
+      - name: Publish Go test results
+        if: ${{ inputs.language == 'go' }}
+        kind: test
+        uses: cloudbees-io/publish-test-results@v1
+        with:
+          test-type: JUnit
+          folder-name: ${{ cloudbees.workspace }}
+
+      - name: Publish Go evidence
+        if: ${{ inputs.language == 'go' }}
+        kind: test
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: |
+            ## Test Stage (Go)
+
+            ### Test Results
+            ${{ steps.GoTests.outputs.TEST_SUMMARY }}
+
+            ### Code Coverage
+            ${{ steps.GoTests.outputs.CODE_COVERAGE }}
+
+      # ---------------------- NODE ----------------------
+      - name: Run Node tests
+        if: ${{ inputs.language == 'node' }}
+        id: NodeTests
+        kind: test
+        uses: docker://node:20-alpine
+        env:
+          CI: "true"
+          JEST_JUNIT_OUTPUT: ${{ cloudbees.workspace }}/junit.xml
+          JEST_JUNIT_ADD_FILE_ATTRIBUTE: "true"
+          COVERAGE_ROOT: ${{ inputs.coverage_root }}
+          DEBUG: ${{ inputs.debug }}
+          # >>> make tests deterministic <<<
+          REACT_APP_LOGIN_LABEL: "Login"
+          REACT_APP_SHOW_BETA: "1"
+          REACT_APP_SHOW_DEBUG_FOOTER: "1"
+          # >>> CloudBees Smart Tests integration <<<
+          APP_NAME: ${{ inputs.app_name }}
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+          CLOUDBEES_BUILD_ID: ${{ cloudbees.run_id }}
+        run: |
+          set -eu
+          apk add --no-cache git libxml2-utils
+          echo "Node: $(node -v)"; echo "NPM: $(npm -v)"
+          npm ci
+          npm i -D jest-junit
+
+          # ========== CloudBees Smart Tests Integration START ==========
+          # Install Launchable CLI (optional, only if enabled and token provided)
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Installing CloudBees Smart Tests CLI ==="
+            apk add --no-cache python3 py3-pip openjdk17-jre-headless || {
+              echo "Warning: Dependencies installation failed, continuing without Smart Tests"
+              unset LAUNCHABLE_TOKEN
+            }
+            if [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+              pip3 install launchable --break-system-packages || {
+                echo "Warning: Launchable CLI install failed, continuing without Smart Tests"
+                unset LAUNCHABLE_TOKEN
+              }
+            fi
+          fi
+
+          # Record build to Smart Tests
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Recording build to Smart Tests ==="
+            SMART_TESTS_BUILD_NAME="cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
+            printf '%s' "$SMART_TESTS_BUILD_NAME" > /tmp/smart_tests_build_name.txt
+            launchable record build --name "$SMART_TESTS_BUILD_NAME" || {
+              echo "Warning: Build recording failed, continuing without Smart Tests"
+              unset LAUNCHABLE_TOKEN
+            }
+          fi
+
+          # Create test session
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Creating Smart Tests session ==="
+            launchable record session --build "cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
+              echo "Warning: Session creation failed, running all tests"
+              unset LAUNCHABLE_TOKEN
+            }
+          fi
+
+          # Get test subset
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
+            echo "=== Getting Smart Tests subset ==="
+            # Generate list of all test files and pipe to subset command
+            find src -type f \( -name "*.test.js" -o -name "*.test.jsx" -o -name "*.test.ts" -o -name "*.test.tsx" \) | \
+              launchable subset --session "$(cat /tmp/launchable-session.txt)" file > /tmp/launchable-subset.txt || {
+              echo "Warning: Subset generation failed, running all tests"
+              rm -f /tmp/launchable-subset.txt
+            }
+
+            if [ -s /tmp/launchable-subset.txt ]; then
+              echo "=== Smart Tests subset generated ==="
+              cat /tmp/launchable-subset.txt
+            fi
+          fi
+          # ========== CloudBees Smart Tests Integration END ==========
+
+          set +e
+          set -o pipefail
+
+          # Run tests (subset or all)
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ] && [ -s /tmp/launchable-subset.txt ]; then
+            echo "=== Running Smart Tests subset ==="
+            # Convert subset file to Jest testPathPattern
+            SUBSET_PATTERN=$(cat /tmp/launchable-subset.txt | sed 's|^./||' | paste -sd '|' -)
+            npx react-scripts test --watchAll=false \
+              --reporters=default --reporters=jest-junit \
+              --coverage \
+              --coverageReporters=text --coverageReporters=json-summary \
+              --collectCoverageFrom="${COVERAGE_ROOT}/**/*.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/*.test.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/__tests__/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/__mocks__/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/mocks/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/*.{story,stories}.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/setupTests.{js,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/index.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/main.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!**/*.d.ts" \
+              --testPathPattern="${SUBSET_PATTERN}" \
+            | tee coverage_stdout.txt
+          else
+            echo "=== Running all tests (Smart Tests not active) ==="
+            npx react-scripts test --watchAll=false \
+              --reporters=default --reporters=jest-junit \
+              --coverage \
+              --coverageReporters=text --coverageReporters=json-summary \
+              --collectCoverageFrom="${COVERAGE_ROOT}/**/*.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/*.test.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/__tests__/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/__mocks__/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/mocks/**" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/**/*.{story,stories}.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/setupTests.{js,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/index.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!${COVERAGE_ROOT}/main.{js,jsx,ts,tsx}" \
+              --collectCoverageFrom="!**/*.d.ts" \
+            | tee coverage_stdout.txt
+          fi
+          STATUS=$?
+          set +o pipefail
+          set -e
+
+          # Record test results to Smart Tests
+          if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ] && [ -f junit.xml ]; then
+            echo "=== Recording test results to Smart Tests ==="
+            launchable record tests --session "$(cat /tmp/launchable-session.txt)" file junit.xml || {
+              echo "Warning: Test result recording failed"
+            }
+          fi
+
+          # Parse test results from JUnit XML
+          if [ -f junit.xml ]; then
+            TOTAL=$(xmllint --xpath "count(//testcase)" junit.xml 2>/dev/null || echo "0")
+            FAILED=$(xmllint --xpath "count(//testcase/failure)" junit.xml 2>/dev/null || echo "0")
+            ERRORS=$(xmllint --xpath "count(//testcase/error)" junit.xml 2>/dev/null || echo "0")
+            SKIPPED=$(xmllint --xpath "count(//testcase/skipped)" junit.xml 2>/dev/null || echo "0")
+            PASSED=$((TOTAL - FAILED - ERRORS - SKIPPED))
+
+            {
+              echo "**Tests Run:** $TOTAL"
+              echo "**Passed:** $PASSED"
+              echo "**Failed:** $FAILED"
+              echo "**Errors:** $ERRORS"
+              echo "**Skipped:** $SKIPPED"
+            } > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          else
+            echo "No test results available" > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          fi
+
+          if [ -s coverage_stdout.txt ]; then
+            { echo '```'; cat coverage_stdout.txt; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          else
+            { echo '```'; echo '(no coverage output captured)'; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          fi
+
+          # Output Smart Tests build name if it was set
+          if [ -f /tmp/smart_tests_build_name.txt ]; then
+            printf '%s' "$(cat /tmp/smart_tests_build_name.txt)" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          else
+            printf '%s' "" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          fi
+
+          exit $STATUS
+
+      - name: Publish Node test results
+        if: ${{ inputs.language == 'node' }}
+        kind: test
+        uses: cloudbees-io/publish-test-results@v1
+        with:
+          test-type: JUnit
+          folder-name: ${{ cloudbees.workspace }}/junit.xml
+
+      - name: Publish Node evidence
+        if: ${{ inputs.language == 'node' }}
+        kind: test
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: |
+            ## Test Stage (Node)
+
+            ### Test Results
+            ${{ steps.NodeTests.outputs.TEST_SUMMARY }}
+
+            ### Code Coverage
+            ${{ steps.NodeTests.outputs.CODE_COVERAGE }}
+
+      # --------------------- PYTHON ---------------------
+      - name: Run Python tests
+        if: ${{ inputs.language == 'python' }}
+        id: PyTests
+        kind: test
+        uses: docker://python:3.11-alpine
+        env:
+          CI: "true"
+          DEBUG: ${{ inputs.debug }}
+        run: |
+          set -eu
+          apk add --no-cache gcc musl-dev
+          pip install -U pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest pytest-cov junit-xml
+
+          set +e
+          set -o pipefail
+          pytest --junitxml=junit.xml --cov=. --cov-report=term-missing \
+          | tee coverage_stdout.txt
+          STATUS=$?
+          set +o pipefail
+          set -e
+
+          if [ -s coverage_stdout.txt ]; then
+            { echo '```'; cat coverage_stdout.txt; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          else
+            { echo '```'; echo '(no coverage output captured)'; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          fi
+
+          exit $STATUS
+
+      - name: Publish Python test results
+        if: ${{ inputs.language == 'python' }}
+        kind: test
+        uses: cloudbees-io/publish-test-results@v1
+        with:
+          test-type: JUnit
+          folder-name: ${{ cloudbees.workspace }}
+
+      - name: Publish Python evidence
+        if: ${{ inputs.language == 'python' }}
+        kind: test
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: |
+            ## Test Stage (Python)
+            Code coverage (if available):
+            ${{ steps.PyTests.outputs.CODE_COVERAGE }}
+
+      # ---------- Normalize job output for callers ----------
+      - name: Choose coverage output
+        id: ChooseCoverage
+        uses: docker://alpine:3.20
+        env:
+          GO_COV: ${{ steps.GoTests.outputs.CODE_COVERAGE }}
+          GO_TEST: ${{ steps.GoTests.outputs.TEST_SUMMARY }}
+          GO_SMART_TESTS: ${{ steps.GoTests.outputs.SMART_TESTS_BUILD_NAME }}
+          NODE_COV: ${{ steps.NodeTests.outputs.CODE_COVERAGE }}
+          NODE_TEST: ${{ steps.NodeTests.outputs.TEST_SUMMARY }}
+          NODE_SMART_TESTS: ${{ steps.NodeTests.outputs.SMART_TESTS_BUILD_NAME }}
+          PY_COV: ${{ steps.PyTests.outputs.CODE_COVERAGE }}
+        run: |
+          set -eu
+          if [ -n "${GO_COV:-}" ]; then
+            printf '%s\n' "$GO_COV" > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          elif [ -n "${NODE_COV:-}" ]; then
+            printf '%s\n' "$NODE_COV" > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          elif [ -n "${PY_COV:-}" ]; then
+            printf '%s\n' "$PY_COV" > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          else
+            { echo '```'; echo '(no coverage output captured)'; echo '```'; } > "$CLOUDBEES_OUTPUTS/CODE_COVERAGE"
+          fi
+
+          if [ -n "${GO_TEST:-}" ]; then
+            printf '%s\n' "$GO_TEST" > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          elif [ -n "${NODE_TEST:-}" ]; then
+            printf '%s\n' "$NODE_TEST" > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          else
+            echo "No test summary available" > "$CLOUDBEES_OUTPUTS/TEST_SUMMARY"
+          fi
+
+          if [ -n "${GO_SMART_TESTS:-}" ]; then
+            printf '%s' "$GO_SMART_TESTS" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          elif [ -n "${NODE_SMART_TESTS:-}" ]; then
+            printf '%s' "$NODE_SMART_TESTS" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          else
+            printf '%s' "" > "$CLOUDBEES_OUTPUTS/SMART_TESTS_BUILD_NAME"
+          fi

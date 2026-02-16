@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: squid-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-squid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-squidpw}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Keep this mount: any SQL here runs at cluster init (fresh volume only)
+      - ../kraken-auth/db/initdb:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-squid} -d ${POSTGRES_DB:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Idempotently ensure squid_auth DB exists (works on reused volumes too)
+  db-bootstrap:
+    image: postgres:15-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-squid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-squidpw}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-squidpw}
+    entrypoint: [ "sh", "-lc" ]
+    command: >
+      'set -e;
+      # wait for server
+      until pg_isready -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"; do sleep 1; done;
+      # check if DB exists; if not, create it
+      if ! psql -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -tAc "SELECT 1 FROM pg_database WHERE datname='\''squid_auth'\''" | grep -q 1; then
+        echo "Creating database squid_auth...";
+        psql -h postgres -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE squid_auth";
+      else
+        echo "Database squid_auth already exists.";
+      fi
+      echo "Bootstrap complete."
+      '  
+    
+    restart: "no"
+  
+  liquibase-auth:
+    image: liquibase/liquibase:4.27
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /liquibase/changelog
+    environment:
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog-root.xml
+      LIQUIBASE_COMMAND_URL: jdbc:postgresql://postgres:5432/squid_auth
+      LIQUIBASE_COMMAND_USERNAME: ${POSTGRES_USER:-squid}
+      LIQUIBASE_COMMAND_PASSWORD: ${POSTGRES_PASSWORD:-squidpw}
+      LIQUIBASE_LOG_LEVEL: info
+    volumes:
+      - ../kraken-auth/db/liquibase/auth:/liquibase/changelog:ro
+    command: ["update"]
+    restart: "no"
+  
+  
+
+volumes:
+  db-data:

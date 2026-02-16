@@ -1,0 +1,134 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Reusable Build (Container Image)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        type: string
+        required: true
+      docker_user:
+        type: string
+        required: true
+      docker_registry:
+        type: string
+        required: false
+        default: "https://index.docker.io/v1/"
+      context:
+        type: string
+        required: false
+        default: "."
+      dockerfile:
+        type: string
+        required: false
+        default: "Dockerfile"
+      debug:
+        type: string
+        required: false
+        default: "false"
+      commit_sha:
+        type: string
+        required: false
+        default: ""
+      push_latest:
+        type: string
+        required: false
+        default: "true"
+    secrets:
+      docker_token:
+        required: true
+    # >>> Expose outputs to the caller <<<
+    outputs:
+      VERSION:
+        value: ${{ jobs.build-container-image.outputs.VERSION }}
+      ARTIFACT_ID_RAW:
+        value: ${{ jobs.build-container-image.outputs.ARTIFACT_ID_RAW }}
+      PRIMARY_ARTIFACT_ID:
+        value: ${{ jobs.build-container-image.outputs.PRIMARY_ARTIFACT_ID }}
+
+jobs:
+  build-container-image:
+    outputs:
+      VERSION: ${{ steps.ver.outputs.VERSION }}
+      ARTIFACT_ID_RAW: ${{ steps.kaniko.outputs.artifact-ids }}
+      PRIMARY_ARTIFACT_ID: ${{ steps.pick-art.outputs.id }}
+    steps:
+      - name: Checkout source
+        uses: cloudbees-io/checkout@v1
+
+      - name: Configure Docker credentials
+        uses: cloudbees-io/configure-oci-credentials@v1
+        with:
+          registry: ${{ inputs.docker_registry }}
+          username: ${{ inputs.docker_user }}
+          password: ${{ secrets.docker_token }}
+
+      - name: Compute version (CalVer+sha)
+        id: ver
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          GIT_SHA_FROM_INPUT: ${{ inputs.commit_sha }}
+          GIT_SHA_DEFAULT: ${{ cloudbees.scm.sha }}
+        run: |
+          set -eu
+          SHA="${GIT_SHA_FROM_INPUT:-$GIT_SHA_DEFAULT}"
+          DATE=$(date -u +%Y.%m.%d)
+          SHA12=$(printf '%s' "$SHA" | cut -c1-12)
+          BUILD_N=1
+          VERSION="${DATE}.${BUILD_N}-${SHA12}"
+          printf '%s' "$VERSION" > "$CLOUDBEES_OUTPUTS/VERSION"
+
+      - name: Build & push image
+        kind: build
+        id: kaniko
+        uses: cloudbees-io/kaniko@v1
+        with:
+          dockerfile: ${{ inputs.dockerfile }}
+          context: ${{ inputs.context }}
+          destination: >-
+            ${{ inputs.docker_user }}/${{ inputs.app_name }}:${{ steps.ver.outputs.VERSION }}${{
+              inputs.push_latest == 'true' && format(',{0}/{1}:latest', inputs.docker_user, inputs.app_name) || ''
+            }}
+
+      - name: Parse primary artifact-id
+        id: pick-art
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          IDS: ${{ steps.kaniko.outputs.artifact-ids }}
+          DEBUG: ${{ inputs.debug }}
+        run: |
+          set -eu
+          [ "${DEBUG}" = "true" ] && printf 'RAW_IDS<<EOF\n%s\nEOF\n' "$IDS" >&2 || true
+
+          ART_ID=""
+          if printf '%s' "$IDS" | grep -q '^map\['; then
+            S=$(printf '%s' "$IDS" | sed -e 's/^map\[//' -e 's/\]$//')
+            FIRST=$(printf '%s' "$S" | awk '{print $1}')
+            ART_ID=$(printf '%s' "$FIRST" | awk -F: '{print $NF}')
+          elif printf '%s' "$IDS" | grep -q '^{'; then
+            # Extract UUID using grep with regex pattern (handles multiline JSON)
+            ART_ID=$(printf '%s' "$IDS" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n 1)
+          else
+            FIRST=$(printf '%s' "$IDS" | tr ', ' '\n' | sed -n '1p')
+            ART_ID=$(printf '%s' "$FIRST" | awk -F: '{print $NF}')
+          fi
+
+          ART_ID=$(printf '%s' "$ART_ID" | tr -d ' \t\r\n')
+          case "$ART_ID" in
+            ????????-????-????-????-????????????) : ;;
+            *) echo "Parsed artifact-id does not look like a UUID: '$ART_ID'" >&2; exit 1;;
+          esac
+
+          printf '%s' "$ART_ID" > "$CLOUDBEES_OUTPUTS/id"
+
+      - name: Publish build evidence
+        kind: build
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |
+            ## Image Built and Pushed
+            Image: `${{ inputs.docker_user }}/${{ inputs.app_name }}:${{ steps.ver.outputs.VERSION }}`
+          format: MARKDOWN

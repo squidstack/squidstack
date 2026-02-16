@@ -1,0 +1,192 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Shared Deploy Template for SquidStack Components
+
+on:
+  workflow_call:
+    inputs:
+      application_name:
+        type: string
+        required: true
+      component_name:
+        type: string
+        required: true
+      environment_name:
+        type: string
+        required: true
+      docker_repo:
+        type: string
+        required: true
+      hostname:
+        type: string
+        required: true
+      artifact_id:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      commit_sha:
+        type: string
+        required: true
+      chart_subpath:
+        type: string
+        required: true
+
+      uses_postgres:
+        type: string
+        required: false
+        default: "false"
+      uses_liquibase:
+        type: string
+        required: false
+        default: "false"
+      liquibase_image:
+        type: string
+        required: false
+        default: "liquibase/liquibase:4.27"
+
+      db_username:
+        type: string
+        required: false
+        default: "postgres"
+      db_name:
+        type: string
+        required: false
+        default: "postgres"
+
+      use_external_db:
+        type: string
+        required: false
+        default: "false"
+      external_db_host:
+        type: string
+        required: false
+        default: ""
+      external_db_port:
+        type: string
+        required: false
+        default: "5432"
+      external_db_name:
+        type: string
+        required: false
+        default: ""
+      external_db_username:
+        type: string
+        required: false
+        default: ""
+
+    secrets:
+      kubeconfig_secret:
+        required: true
+      JWT_SECRET:
+        required: false
+      FM_KEY_SECRET:
+        required: false
+      DB_PASSWORD:
+        required: false
+      EXT_DB_PASSWORD:
+        required: false
+
+        
+jobs:
+  deploy:
+    steps:
+      - name: Checkout source
+        uses: cloudbees-io/checkout@v1
+
+      - name: Set kubeconfig
+        uses: guru-actions/kubeconfig@1.12
+        with:
+          secname: ${{ secrets.kubeconfig_secret }}
+          
+      - name: Build Helm dependencies (if any)
+        id: build-deps
+        uses: docker://alpine/helm:3.14.4
+        shell: sh
+        run: |
+          set -eu
+          cd "${CLOUDBEES_WORKSPACE}/${{ inputs.chart_subpath }}"
+          if grep -q 'dependencies:' Chart.yaml; then
+            echo "Chart has dependencies, building..."
+            helm repo add bitnami https://charts.bitnami.com/bitnami
+            helm dependency build
+          else
+            echo "No dependencies found, skipping build."
+          fi
+      - name: Install helm chart
+        kind: deploy
+        uses: cloudbees-io/helm-install@v1
+        with:
+          chart-location: ${{ inputs.chart_subpath }}
+          release-name: ${{ inputs.component_name }}
+          namespace: ${{ inputs.environment_name }}
+          values: |
+            image:
+              repository: ${{ inputs.docker_repo }}
+              tag: ${{ inputs.version }}
+              
+            liquibase:
+              image: ${{ inputs.liquibase_image }}
+
+            env:
+              HOSTNAME: ${{ inputs.hostname }}
+              COMMIT_SHA: ${{ inputs.commit_sha }}
+
+            postgresql:
+              enabled: ${{ inputs.uses_postgres == 'true' && inputs.use_external_db != 'true' }}
+              fullnameOverride: ${{ inputs.component_name }}-postgresql  
+              auth:
+                username: ${{ inputs.db_username }}
+                password: ${{ secrets.DB_PASSWORD }}
+                database: ${{ inputs.db_name }}
+              networkPolicy:
+                enabled: false
+              primary:
+                networkPolicy:
+                  enabled: false
+              readReplicas:
+                networkPolicy:
+                  enabled: false 
+
+            externalDb:
+              host: ${{ inputs.external_db_host }}
+              port: ${{ inputs.external_db_port }}
+              database: ${{ inputs.external_db_name }}
+              username: ${{ inputs.external_db_username }}
+              password: ${{ secrets.EXT_DB_PASSWORD }}
+
+            featureFlags:
+              fmKey: ${{ secrets.FM_KEY_SECRET }}
+
+            secrets:
+              jwtSecret: ${{ secrets.JWT_SECRET }}
+
+  collect-liquibase-evidence:
+    if: ${{ inputs.uses_liquibase == 'true' }}
+    needs: [deploy]
+    steps:
+      - name: Run Liquibase evidence collection
+        uses: docker://liquibase/liquibase:4.27
+        shell: sh
+        env:
+          LIQUIBASE_URL: jdbc:postgresql://${{ inputs.external_db_host || 'kraken-auth-postgresql' }}:5432/${{ inputs.db_name }}
+          LIQUIBASE_USERNAME: ${{ inputs.external_db_username || inputs.db_username }}
+          LIQUIBASE_PASSWORD: ${{ secrets.EXT_DB_PASSWORD || secrets.DB_PASSWORD }}
+        run: |
+          liquibase --url=$LIQUIBASE_URL \
+                   --username=$LIQUIBASE_USERNAME \
+                   --password=$LIQUIBASE_PASSWORD \
+                   history
+          liquibase --url=$LIQUIBASE_URL \
+                   --username=$LIQUIBASE_USERNAME \
+                   --password=$LIQUIBASE_PASSWORD \
+                   status
+
+      - name: Post Liquibase evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: |
+            ## Liquibase Evidence (env: ${{ inputs.environment_name }})
+            Liquibase history and status collected successfully.
+          format: MARKDOWN

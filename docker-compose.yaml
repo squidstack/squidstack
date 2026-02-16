@@ -1,0 +1,170 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: squid-postgres
+    environment:
+      POSTGRES_USER: squid
+      POSTGRES_PASSWORD: squidpw
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U squid -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - squidstack-net
+
+  # Database bootstrap - ensures squid_auth DB exists
+  db-bootstrap:
+    image: postgres:15-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: squid
+      POSTGRES_PASSWORD: squidpw
+      POSTGRES_DB: postgres
+      PGPASSWORD: squidpw
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        until pg_isready -h postgres -U squid -d postgres; do sleep 1; done
+        if ! psql -h postgres -U squid -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='squid_auth'" | grep -q 1; then
+          echo "Creating database squid_auth..."
+          psql -h postgres -U squid -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE squid_auth"
+        else
+          echo "Database squid_auth already exists."
+        fi
+        echo "Bootstrap complete."
+    networks:
+      - squidstack-net
+    restart: "no"
+
+  # Liquibase migrations for kraken-auth
+  liquibase-auth:
+    image: liquibase/liquibase:4.27
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+    working_dir: /liquibase/changelog
+    environment:
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog-root.xml
+      LIQUIBASE_COMMAND_URL: jdbc:postgresql://postgres:5432/squid_auth
+      LIQUIBASE_COMMAND_USERNAME: squid
+      LIQUIBASE_COMMAND_PASSWORD: squidpw
+      LIQUIBASE_LOG_LEVEL: info
+    volumes:
+      - ../kraken-auth/liquibase:/liquibase/changelog:ro
+    command: ["update"]
+    networks:
+      - squidstack-net
+    restart: "no"
+
+  liquibase-catalog:
+    image: liquibase/liquibase:4.27
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+    working_dir: /liquibase/changelog
+    environment:
+      LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog-root.xml
+      LIQUIBASE_COMMAND_URL: jdbc:postgresql://postgres:5432/squid_auth
+      LIQUIBASE_COMMAND_USERNAME: squid
+      LIQUIBASE_COMMAND_PASSWORD: squidpw
+      LIQUIBASE_LOG_LEVEL: info
+    volumes:
+      - ../clam-catalog/liquibase:/liquibase/changelog:ro
+    command: ["update"]
+    networks:
+      - squidstack-net
+    restart: "no"
+
+  squid-ui:
+    build:
+      context: ../squid-ui
+    ports:
+      - "3000:80"
+    volumes:
+      - ../squid-ui/nginx.docker.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./fm-key-local.txt:/run/secrets/FM_KEY:ro
+      - ./config:/usr/share/nginx/html/config
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /usr/share/nginx/html/config
+        FM_KEY="$$(cat /run/secrets/FM_KEY)"
+        printf '{"envKey":"%s"}\n' "$$FM_KEY" > /usr/share/nginx/html/config/fm.json
+        exec nginx -g 'daemon off;'
+    depends_on:
+      - kraken-auth
+      - clam-catalog
+      - codlocker-assets
+    networks:
+      - squidstack-net
+
+  kraken-auth:
+    build:
+      context: ../kraken-auth
+    ports:
+      - "8080:8080"
+    environment:
+      - JWT_SECRET=footest
+      - FM_NAMESPACE=default
+      - AUTH_DB_URL=postgresql://squid:squidpw@postgres:5432/squid_auth?sslmode=disable
+    volumes:
+      - ./fm-key-local.txt:/app/config/fm.json:ro
+    depends_on:
+      liquibase-auth:
+        condition: service_completed_successfully
+    networks:
+      - squidstack-net
+
+  clam-catalog:
+    build:
+      context: ../clam-catalog
+    ports:
+      - "8082:8080"
+    environment:
+      - JWT_SECRET=footest
+      - FM_NAMESPACE=default
+      - AUTH_DB_URL=postgresql://squid:squidpw@postgres:5432/squid_auth?sslmode=disable
+    volumes:
+      - ./fm-key-local.txt:/app/config/fm.json:ro
+    depends_on:
+      liquibase-auth:
+        condition: service_completed_successfully
+      liquibase-catalog:
+        condition: service_completed_successfully
+    networks:
+      - squidstack-net
+
+  codlocker-assets:
+    build:
+      context: ../codlocker-assets
+    ports:
+      - "8081:8080"
+    environment:
+      - FM_NAMESPACE=default
+      - AUTH_DB_URL=postgresql://squid:squidpw@postgres:5432/squid_auth?sslmode=disable
+    volumes:
+      - ./fm-key-local.txt:/app/config/fm.json:ro
+    depends_on:
+      liquibase-auth:
+        condition: service_completed_successfully
+    networks:
+      - squidstack-net
+
+networks:
+  squidstack-net:
+    driver: bridge
+
+volumes:
+  db-data:

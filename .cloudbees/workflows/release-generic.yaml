@@ -1,0 +1,103 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Generic Release Trigger
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        type: string
+        required: true
+        description: "Component name (e.g. 'jellyfish-notifications')"
+      component_id:
+        type: string
+        required: true
+        description: "CloudBees Unify component ID (e.g. '0412edae-fc75-4ff4-9bd4-8b5875513aeb')"
+      version:
+        type: string
+        required: true
+        description: "Version to deploy (from build output)"
+      smart_tests_build_name:
+        type: string
+        required: false
+        default: ""
+        description: "Smart Tests build name from test job (for E2E test linking)"
+      environment:
+        type: string
+        required: false
+        default: "squid-demo-3"
+        description: "Target environment for release"
+      release_name_prefix:
+        type: string
+        required: false
+        default: ""
+        description: "Release name prefix (defaults to shortened component name)"
+      ignore_releases:
+        type: string
+        required: false
+        default: "rel-test-sb--squid-demo-3-20260202-114850-23326"
+        description: "Comma-delimited list of release names to ignore when checking for concurrent releases (useful for stuck releases)"
+
+jobs:
+  trigger-release:
+    steps:
+      - name: Create and run CloudBees Unify release
+        id: release
+        uses: guru-actions/create_release@main
+        with:
+          cb_api_token: ${{ secrets.sb_internal_api }}
+          cb_org_id: "8d16bd77-d506-45e6-a0f4-8884ce16d301"
+          cb_application_id: "e3925a1f-9165-4767-9d6e-a96bb4edc80a"
+          cb_workflow_id: "95577bc1-5682-46d8-9246-0b13009e2b6e"
+          cb_environment: ${{ inputs.environment }}
+          release_name_prefix: ${{ inputs.release_name_prefix != '' && inputs.release_name_prefix || format('{0}-', inputs.component_name) }}
+          component_overrides: "${{ inputs.component_id }}=${{ inputs.version }}"
+          close_on_pass: "true"
+          skip_release_on_missing_artifacts: "false"
+          selection_report_format: "markdown"
+          prevent_concurrent_releases: "wait"
+          queue_check_sleep_seconds: "45"
+          wait_sleep_seconds: "45"
+          max_wait_attempts: "90"
+          enable_api_diagnostics: "false"
+          smart_tests_component: ${{ inputs.component_name }}
+          smart_tests_build_name: ${{ inputs.smart_tests_build_name }}
+          ignore_releases: ${{ inputs.ignore_releases }}
+
+      - name: Show release status
+        uses: docker://alpine:3.18
+        run: |
+          echo "==================== RELEASE STATUS ===================="
+          echo "Component: ${{ inputs.component_name }}"
+          echo "Version: ${{ inputs.version }}"
+          echo "Environment: ${{ inputs.environment }}"
+          echo "Status: ${{ steps.release.outputs.status }}"
+          echo "Release ID: ${{ steps.release.outputs.release_id }}"
+          echo "Release Name: ${{ steps.release.outputs.release_name }}"
+          echo "Run ID: ${{ steps.release.outputs.run_id }}"
+          echo "========================================================"
+
+      - name: Publish release link evidence
+        kind: deploy
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: |
+            ## CloudBees Unify Release
+
+            **Component:** ${{ inputs.component_name }}
+            **Version:** ${{ inputs.version }}
+            **Environment:** ${{ inputs.environment }}
+            **Status:** ${{ steps.release.outputs.status }}
+
+            **Release Name:** `${{ steps.release.outputs.release_name }}`
+            **Release ID:** `${{ steps.release.outputs.release_id }}`
+            **Run ID:** `${{ steps.release.outputs.run_id }}`
+
+            ### 🔗 Release Link
+            [View Release in CloudBees Unify](https://cloudbees.io/cloudbees/8d16bd77-d506-45e6-a0f4-8884ce16d301/applications/e3925a1f-9165-4767-9d6e-a96bb4edc80a/releases/${{ steps.release.outputs.release_id }}?organizationId=8d16bd77-d506-45e6-a0f4-8884ce16d301)
+
+      - name: Publish component selection evidence
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: ${{ steps.release.outputs.selection_report }}

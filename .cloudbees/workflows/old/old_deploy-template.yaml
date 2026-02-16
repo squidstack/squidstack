@@ -1,0 +1,168 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: Shared Deploy Template for SquidStack Components
+
+on:
+  workflow_call:
+    inputs:
+      application_name:
+        type: string
+        required: true
+      component_name:
+        type: string
+        required: true  
+      environment_name:
+        type: string
+        required: true
+      docker_repo:
+        type: string
+        required: true
+      hostname:
+        type: string
+        required: true
+      tls_secret:
+        type: string
+        required: false
+        default: squid
+      cluster_issuer:
+        type: string
+        required: false
+        default: "letsencrypt-prod"
+      ingress_class:
+        type: string
+        required: false
+        default: "nginx"
+      artifact_id:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      commit_sha:
+        type: string
+        required: false
+      feature_flags_enabled:
+        type: string
+        required: false
+        default: "true"
+      feature_flags_secret_name:
+        type: string
+        required: false
+        default: "feature-mgmt"
+      feature_flags_secret_key:
+        type: string
+        required: false
+        default: "FM_KEY"
+      feature_flags_create_secret:
+        type: string
+        required: false
+        default: "true"
+      image_pull_policy:
+        type: string
+        required: false
+        default: "Always"
+      replica_count:
+        type: string
+        required: false
+        default: "1"
+      feature_admin_health:
+        type: string
+        required: false
+        default: "true"
+
+    secrets:
+      kubeconfig_secret:
+        required: true
+      FM_KEY_SECRET:
+        required: true
+
+jobs:
+  deploy:
+    environment: ${{ inputs.environment_name }}
+    steps:
+      - name: Checkout
+        uses: cloudbees-io/checkout@v1
+
+      - name: Set kubeconfig
+        uses: guru-actions/kubeconfig@1.12
+        with:
+          secname: ${{ secrets.kubeconfig_secret }}
+
+      - name: Install helm chart
+        kind: deploy
+        uses: cloudbees-io/helm-install@v1
+        with:
+          chart-location: ${{ cloudbees.workspace }}/chart
+          release-name: ${{ inputs.component_name }}
+          namespace: ${{ inputs.environment_name }}
+          values: |
+            featureFlags:
+              enabled: ${{ inputs.feature_flags_enabled }}
+              secretName: ${{ inputs.feature_flags_secret_name }}
+              secretKey: ${{ inputs.feature_flags_secret_key }}
+              createSecret: ${{ inputs.feature_flags_create_secret }}
+              fmKey: ${{ secrets.FM_KEY_SECRET }}
+            ingress:
+              enabled: true
+              className: "${{ inputs.ingress_class }}"
+              annotations:
+                cert-manager.io/cluster-issuer: "${{ inputs.cluster_issuer }}"
+              hosts:
+                - host: ${{ inputs.hostname }}
+                  paths:
+                    - path: /
+                      pathType: Prefix
+              tls:
+                - secretName: ${{ inputs.tls_secret }}
+                  hosts:
+                    - ${{ inputs.hostname }}
+            image:
+              repository: ${{ inputs.docker_repo }}
+              tag: ${{ inputs.version }}
+              pullPolicy: ${{ inputs.image_pull_policy }}
+            replicaCount: ${{ inputs.replica_count }}
+            resources:
+              requests: { cpu: 50m, memory: 64Mi }
+              limits:   { cpu: 250m, memory: 256Mi }
+            env:
+              - name: FEATURE_ADMIN_HEALTH
+                value: ${{ inputs.feature_admin_health }}
+
+      - name: Publish deploy evidence
+        kind: deploy
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          format: MARKDOWN
+          content: |-
+            ## Deployed environment (${{ inputs.environment_name }})
+            [Frontend](https://${{ inputs.hostname }}/)
+            Version: `${{ inputs.version }}`
+            Commit: `${{ inputs.commit_sha || cloudbees.scm.sha }}`
+
+      - name: Shorten SHA for labels
+        id: short-sha
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          GIT_SHA: ${{ inputs.commit_sha || cloudbees.scm.sha }}
+        run: |
+          set -eu
+          printf '%s' "$GIT_SHA" | cut -c1-12 > "$CLOUDBEES_OUTPUTS/sha12"
+
+      - name: Shorten Version for labels
+        id: short-ver
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          printf '%s' "${VERSION%%-*}" > "$CLOUDBEES_OUTPUTS/ver"
+
+      - name: Register deployed artifact
+        kind: deploy
+        uses: cloudbees-io/register-deployed-artifact@v2
+        with:
+          artifact-id: ${{ inputs.artifact_id }}
+          target-environment: ${{ inputs.environment_name }}
+          labels: ver=${{ steps.short-ver.outputs.ver }}, sha=${{ steps.short-sha.outputs.sha12 }}, ns=${{ inputs.environment_name }}, rel=${{ inputs.component_name }}

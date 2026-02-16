@@ -87,7 +87,7 @@ jobs:
           # Record build to Smart Tests
           if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
             echo "=== Recording build to Smart Tests ==="
-            SMART_TESTS_BUILD_NAME="cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
+            SMART_TESTS_BUILD_NAME="squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
             printf '%s' "$SMART_TESTS_BUILD_NAME" > /tmp/smart_tests_build_name.txt
             launchable record build --name "$SMART_TESTS_BUILD_NAME" || {
               echo "Warning: Build recording failed, continuing without Smart Tests"
@@ -98,7 +98,7 @@ jobs:
           # Create test session
           if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
             echo "=== Creating Smart Tests session ==="
-            launchable record session --build "cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
+            launchable record session --build "squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
               echo "Warning: Session creation failed, running all tests"
               unset LAUNCHABLE_TOKEN
             }
@@ -280,7 +280,7 @@ jobs:
           # Record build to Smart Tests
           if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
             echo "=== Recording build to Smart Tests ==="
-            SMART_TESTS_BUILD_NAME="cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
+            SMART_TESTS_BUILD_NAME="squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}"
             printf '%s' "$SMART_TESTS_BUILD_NAME" > /tmp/smart_tests_build_name.txt
             launchable record build --name "$SMART_TESTS_BUILD_NAME" || {
               echo "Warning: Build recording failed, continuing without Smart Tests"
@@ -291,7 +291,7 @@ jobs:
           # Create test session
           if [ "${{ inputs.enable_smart_tests }}" = "true" ] && [ -n "${LAUNCHABLE_TOKEN:-}" ]; then
             echo "=== Creating Smart Tests session ==="
-            launchable record session --build "cb-squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
+            launchable record session --build "squidstack-${APP_NAME}-${CLOUDBEES_BUILD_ID}" --test-suite "${APP_NAME}-tests" > /tmp/launchable-session.txt || {
               echo "Warning: Session creation failed, running all tests"
               unset LAUNCHABLE_TOKEN
             }

@@ -14,7 +14,7 @@ on:
       org_name:
         type: string
         required: false
-        default: "cb-squidstack"
+        default: "squidstack"
       docker_repo:
         type: string
         required: true

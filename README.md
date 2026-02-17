@@ -883,34 +883,191 @@ Each component has its own README with development setup.
 
 **Suspected Cause:** CloudBees platform regression between October-December 2025. The cb-squidstack prod/preprod environments (deployed Oct 22) have this issue, while dev environment (deployed Dec 7) works correctly.
 
-**Workaround:** We manually create all secrets with kubectl before Helm deployment:
+---
 
-1. **Secrets are pre-created** in each namespace using the script in `/tmp/create-aib-secrets.sh`
-2. **Workflows are configured** with `createSecret: false` to skip Helm secret creation
-3. **Secrets to create** for each component in each namespace:
-   - `${component}-fmkey` with `FM_KEY` (environment-specific UUID)
-   - `${component}-secrets` with `jwtSecret`
+### Current Workaround (Manual Secret Creation)
+
+We manually create all secrets with kubectl before Helm deployment:
+
+#### Changes Made to deploy-generic.yaml
+
+File: `.cloudbees/workflows/deploy-generic.yaml`
+
+1. **Disabled security secret creation** (around line 165):
+   ```yaml
+   security:
+     createSecret: false  # Changed from true
+     secretName: ${{ inputs.component_name }}-secrets
+     # REMOVED: jwtSecret: ${{ secrets.JWT_SECRET }}
+   ```
+
+2. **Disabled feature flags secret creation** (around line 197):
+   ```yaml
+   featureFlags:
+     enabled: ${{ inputs.feature_flags_enabled }}
+     secretName: ${{ inputs.component_name }}-fmkey
+     secretKey: ${{ inputs.feature_flags_secret_key }}
+     createSecret: false  # Changed from true
+     # REMOVED: fmKey: ${{ secrets.FM_KEY }}
+   ```
+
+3. **Hardcoded PostgreSQL password** (around line 178):
+   ```yaml
+   postgresql:
+     auth:
+       username: squid
+       password: "abcd1234"  # Changed from ${{ secrets.KRAKEN_DB_PASSWORD }}
+       database: squid_auth
+   ```
+
+#### Manual Secret Creation
+
+**Current Environments:**
+- **squid-integ** (integration): Active, manually created secrets
+- **squid-dev** (development): Feature branches
+- **squid-preprod** (pre-production): Historical, may have mixed manual/auto secrets
+- **squid-prod** (production): Historical
+
+**Secret Creation Script:** `/tmp/move-to-squid-integ.sh`
+
+```bash
+#!/bin/bash
+set -e
+
+FM_KEY="97d28789-8109-449e-bccc-40386c1dae6b"
+JWT_SECRET="abcd1234"
+
+NS="squid-integ"
+COMPONENTS="squid-ui kraken-auth clam-catalog codlocker-assets"
+
+echo "=== Creating secrets in $NS ==="
+
+for COMP in $COMPONENTS; do
+  kubectl delete secret ${COMP}-fmkey -n $NS --ignore-not-found 2>/dev/null || true
+  kubectl create secret generic ${COMP}-fmkey -n $NS --from-literal=FM_KEY="$FM_KEY"
+  echo "  ✓ ${COMP}-fmkey"
+
+  kubectl delete secret ${COMP}-secrets -n $NS --ignore-not-found 2>/dev/null || true
+  kubectl create secret generic ${COMP}-secrets -n $NS --from-literal=JWT_SECRET="$JWT_SECRET"
+  echo "  ✓ ${COMP}-secrets"
+done
+
+echo ""
+echo "✅ All secrets created in squid-integ!"
+```
+
+**IMPORTANT:** The secret key must be `JWT_SECRET` (uppercase), not `jwtSecret` (camelCase). The Helm chart expects uppercase.
 
 **Environment-Specific FM Keys:**
+- **squid-integ**: `97d28789-8109-449e-bccc-40386c1dae6b`
 - **squid-preprod**: `81b62123-6ce2-42c6-b3dd-53aa2f05af04`
 - **squid-prod**: `08ab1a34-695e-4403-afcf-c310b9736395`
 - **squid-dev**: `ab102c9b-f87e-460e-8c1a-4e4ec4330398`
 
-**Script Location:** `/tmp/create-aib-secrets.sh` on the deployment machine
+---
 
-**Manual Secret Creation (if needed):**
+### How to Revert (Test if Unify Fixed the Issue)
+
+When ready to test if CloudBees Unify has fixed the secret masking issue:
+
+#### Step 1: Create Test Branch
 ```bash
-# For each namespace and component:
-kubectl delete secret ${COMPONENT}-fmkey -n ${NAMESPACE} --ignore-not-found
-kubectl create secret generic ${COMPONENT}-fmkey -n ${NAMESPACE} \
-  --from-literal=FM_KEY="${FM_KEY_VALUE}"
-
-kubectl delete secret ${COMPONENT}-secrets -n ${NAMESPACE} --ignore-not-found
-kubectl create secret generic ${COMPONENT}-secrets -n ${NAMESPACE} \
-  --from-literal=jwtSecret="${JWT_SECRET}"
+cd /Users/brown/git_orgs/squidstack/squidstack
+git checkout -b test/unify-secrets-fix
 ```
 
-**Status:** Temporary workaround. Issue should be reported to CloudBees as a potential platform regression.
+#### Step 2: Revert deploy-generic.yaml Changes
+
+File: `.cloudbees/workflows/deploy-generic.yaml`
+
+1. **Re-enable security secret creation** (around line 165):
+   ```yaml
+   security:
+     createSecret: true  # Change from false
+     secretName: ${{ inputs.component_name }}-secrets
+     jwtSecret: ${{ secrets.JWT_SECRET }}  # ADD THIS LINE
+   ```
+
+2. **Re-enable feature flags secret creation** (around line 197):
+   ```yaml
+   featureFlags:
+     enabled: ${{ inputs.feature_flags_enabled }}
+     secretName: ${{ inputs.component_name }}-fmkey
+     secretKey: ${{ inputs.feature_flags_secret_key }}
+     createSecret: true  # Change from false
+     fmKey: ${{ secrets.FM_KEY }}  # ADD THIS LINE
+   ```
+
+3. **Use secret reference for PostgreSQL password** (around line 178):
+   ```yaml
+   postgresql:
+     auth:
+       username: squid
+       password: ${{ secrets.KRAKEN_DB_PASSWORD }}  # Change from "abcd1234"
+       database: squid_auth
+   ```
+
+#### Step 3: Configure CloudBees Unify Secrets
+
+In CloudBees Unify, set these organization-level or environment-level secrets:
+- `JWT_SECRET`: `abcd1234`
+- `FM_KEY`: (environment-specific UUID from list above)
+- `KRAKEN_DB_PASSWORD`: `abcd1234`
+
+#### Step 4: Delete Manually Created Secrets
+```bash
+# For test environment (e.g., squid-dev)
+kubectl delete secret squid-ui-fmkey -n squid-dev
+kubectl delete secret squid-ui-secrets -n squid-dev
+kubectl delete secret kraken-auth-fmkey -n squid-dev
+kubectl delete secret kraken-auth-secrets -n squid-dev
+kubectl delete secret clam-catalog-fmkey -n squid-dev
+kubectl delete secret clam-catalog-secrets -n squid-dev
+kubectl delete secret codlocker-assets-fmkey -n squid-dev
+kubectl delete secret codlocker-assets-secrets -n squid-dev
+```
+
+#### Step 5: Test Deployment
+
+Push to test branch and verify:
+1. Workflows run successfully
+2. Helm install completes without YAML errors
+3. K8s secrets contain actual values (not `***`)
+4. Application starts and feature flags work
+
+```bash
+# Check secret values after deployment
+kubectl get secret squid-ui-fmkey -n squid-dev -o jsonpath='{.data.FM_KEY}' | base64 -d
+# Should show actual UUID, not asterisks
+```
+
+#### Step 6: If Successful, Merge to Main
+
+If the test passes, Unify has fixed the issue:
+```bash
+git add .cloudbees/workflows/deploy-generic.yaml
+git commit -m "Revert secret workaround - Unify issue resolved"
+git push origin test/unify-secrets-fix
+# Create PR and merge to main
+```
+
+---
+
+### Slack Message to Engineering
+
+```
+[Change in behaviour of secrets and workflows]
+
+helm-install@v1 is now masking secret values when passed through Helm values YAML. K8s secrets end up containing `*****` instead of actual values, breaking deployments.
+
+This appears to be a regression - deployments from Oct 2025 worked fine, but Dec 2025+ are broken.
+
+Workaround: manually create secrets via kubectl, set createSecret: false in workflows.
+
+Can engineering investigate?
+```
+
+**Status:** Temporary workaround active for squid-integ environment. Demo stable. Will test revert after AIB demo.
 
 ---
 

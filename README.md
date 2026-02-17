@@ -916,7 +916,7 @@ File: `.cloudbees/workflows/deploy-generic.yaml`
    postgresql:
      auth:
        username: squid
-       password: "abcd1234"  # Changed from ${{ secrets.KRAKEN_DB_PASSWORD }}
+       password: "foobar1234"  # Changed from ${{ secrets.KRAKEN_DB_PASSWORD }}
        database: squid_auth
    ```
 
@@ -935,7 +935,7 @@ File: `.cloudbees/workflows/deploy-generic.yaml`
 set -e
 
 FM_KEY="97d28789-8109-449e-bccc-40386c1dae6b"
-JWT_SECRET="abcd1234"
+JWT_SECRET="foobar1234"
 
 NS="squid-integ"
 COMPONENTS="squid-ui kraken-auth clam-catalog codlocker-assets"
@@ -1003,16 +1003,16 @@ File: `.cloudbees/workflows/deploy-generic.yaml`
    postgresql:
      auth:
        username: squid
-       password: ${{ secrets.KRAKEN_DB_PASSWORD }}  # Change from "abcd1234"
+       password: ${{ secrets.KRAKEN_DB_PASSWORD }}  # Change from "foobar1234"
        database: squid_auth
    ```
 
 #### Step 3: Configure CloudBees Unify Secrets
 
 In CloudBees Unify, set these organization-level or environment-level secrets:
-- `JWT_SECRET`: `abcd1234`
+- `JWT_SECRET`: `foobar1234`
 - `FM_KEY`: (environment-specific UUID from list above)
-- `KRAKEN_DB_PASSWORD`: `abcd1234`
+- `KRAKEN_DB_PASSWORD`: `foobar1234`
 
 #### Step 4: Delete Manually Created Secrets
 ```bash

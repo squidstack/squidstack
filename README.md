@@ -873,6 +873,47 @@ Each component has its own README with development setup.
 
 ---
 
+## ⚠️ Known Issues & Workarounds
+
+### CloudBees Unify helm-install@v1 Secret Masking Issue
+
+**Issue:** CloudBees Unify `helm-install@v1` action masks secret values in Helm values YAML, replacing them with `***` or `*****`. This causes:
+- YAML parsing errors: `yaml: unknown anchor '****' referenced`
+- K8s secrets contain masked values instead of actual secrets
+
+**Suspected Cause:** CloudBees platform regression between October-December 2025. The cb-squidstack prod/preprod environments (deployed Oct 22) have this issue, while dev environment (deployed Dec 7) works correctly.
+
+**Workaround:** We manually create all secrets with kubectl before Helm deployment:
+
+1. **Secrets are pre-created** in each namespace using the script in `/tmp/create-aib-secrets.sh`
+2. **Workflows are configured** with `createSecret: false` to skip Helm secret creation
+3. **Secrets to create** for each component in each namespace:
+   - `${component}-fmkey` with `FM_KEY` (environment-specific UUID)
+   - `${component}-secrets` with `jwtSecret`
+
+**Environment-Specific FM Keys:**
+- **squid-preprod**: `81b62123-6ce2-42c6-b3dd-53aa2f05af04`
+- **squid-prod**: `08ab1a34-695e-4403-afcf-c310b9736395`
+- **squid-dev**: `ab102c9b-f87e-460e-8c1a-4e4ec4330398`
+
+**Script Location:** `/tmp/create-aib-secrets.sh` on the deployment machine
+
+**Manual Secret Creation (if needed):**
+```bash
+# For each namespace and component:
+kubectl delete secret ${COMPONENT}-fmkey -n ${NAMESPACE} --ignore-not-found
+kubectl create secret generic ${COMPONENT}-fmkey -n ${NAMESPACE} \
+  --from-literal=FM_KEY="${FM_KEY_VALUE}"
+
+kubectl delete secret ${COMPONENT}-secrets -n ${NAMESPACE} --ignore-not-found
+kubectl create secret generic ${COMPONENT}-secrets -n ${NAMESPACE} \
+  --from-literal=jwtSecret="${JWT_SECRET}"
+```
+
+**Status:** Temporary workaround. Issue should be reported to CloudBees as a potential platform regression.
+
+---
+
 ## Documentation
 
 - **[TASKS.md](TASKS.md)** - Task tracking and progress

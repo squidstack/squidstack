@@ -1071,6 +1071,43 @@ Can engineering investigate?
 
 ---
 
+### ArgoCD Password Recovery
+
+**Issue:** ArgoCD initial admin password is auto-generated on first install and stored in `argocd-initial-admin-secret`. After first login, this secret is deleted and the password cannot be retrieved.
+
+**Solution:** Force ArgoCD to regenerate a new initial password by removing the password from the secret.
+
+#### Steps to Reset ArgoCD Password
+
+```bash
+# 1. Remove the admin password fields from the secret
+kubectl patch secret argocd-secret -n argocd --type json \
+  -p='[{"op": "remove", "path": "/data/admin.password"}]'
+
+kubectl patch secret argocd-secret -n argocd --type json \
+  -p='[{"op": "remove", "path": "/data/admin.passwordMtime"}]'
+
+# 2. Restart the ArgoCD server to trigger password regeneration
+kubectl rollout restart deployment argocd-server -n argocd
+
+# 3. Wait 15 seconds for the server to restart and generate new password
+sleep 15
+
+# 4. Retrieve the new initial password
+kubectl get secret argocd-initial-admin-secret -n argocd \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+#### ArgoCD Access
+
+**URL:** https://argocd.aib-unify-demo.sa-demo.beescloud.com
+**Username:** `admin`
+**Password:** Retrieved from command above
+
+After logging in with the initial password, ArgoCD will prompt you to change it to something more memorable for the demo.
+
+---
+
 ## Documentation
 
 - **[TASKS.md](TASKS.md)** - Task tracking and progress

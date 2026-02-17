@@ -124,28 +124,11 @@ jobs:
           helm repo add bitnami https://charts.bitnami.com/bitnami
           pwd
           ls -lart
-
+          
           find / -name Chart.yaml
           ls -lart /
           helm dependency build "${CLOUDBEES_WORKSPACE}/chart/${{ inputs.component_name }}"
 
-      - name: Create Feature Management secret
-        if: ${{ inputs.feature_flags_enabled && inputs.feature_flags_create_secret }}
-        uses: docker://alpine/kubectl:1.34.0
-        shell: sh
-        env:
-          FM_KEY_VALUE: ${{ secrets.FM_KEY }}
-          SECRET_NAME: ${{ inputs.component_name }}-fmkey
-          SECRET_KEY: ${{ inputs.feature_flags_secret_key }}
-          NAMESPACE: ${{ inputs.environment_name }}
-        run: |
-          set -eu
-          # Delete existing secret if it exists (to update it)
-          kubectl delete secret "${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
-          # Create new secret with actual FM_KEY value
-          kubectl create secret generic "${SECRET_NAME}" \
-            -n "${NAMESPACE}" \
-            --from-literal="${SECRET_KEY}=${FM_KEY_VALUE}"
 
       - name: Install helm chart
         kind: deploy
@@ -212,7 +195,8 @@ jobs:
               enabled: ${{ inputs.feature_flags_enabled }}
               secretName: ${{ inputs.component_name }}-fmkey
               secretKey: ${{ inputs.feature_flags_secret_key }}
-              createSecret: false
+              createSecret: ${{ inputs.feature_flags_create_secret }}
+              fmKey: ${{ secrets.FM_KEY }}
             env:
               - name: FEATURE_ADMIN_HEALTH
                 value: ${{ inputs.feature_admin_health }}

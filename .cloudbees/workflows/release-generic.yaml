@@ -24,7 +24,7 @@ on:
       environment:
         type: string
         required: false
-        default: "squid-demo-3"
+        default: "squid-preprod"
         description: "Target environment for release"
       release_name_prefix:
         type: string
@@ -45,9 +45,9 @@ jobs:
         uses: guru-actions/create_release@main
         with:
           cb_api_token: ${{ secrets.sb_internal_api }}
-          cb_org_id: "8d16bd77-d506-45e6-a0f4-8884ce16d301"
-          cb_application_id: "e3925a1f-9165-4767-9d6e-a96bb4edc80a"
-          cb_workflow_id: "95577bc1-5682-46d8-9246-0b13009e2b6e"
+          cb_org_id: "11408510-e5d4-4d13-b1be-2c9b28f15aae"
+          cb_application_id: "d2de1f29-84da-4eb7-ae91-060d2665e752"
+          cb_workflow_id: "9c4f4616-957b-4cd0-8402-a443f93bf559"
           cb_environment: ${{ inputs.environment }}
           release_name_prefix: ${{ inputs.release_name_prefix != '' && inputs.release_name_prefix || format('{0}-', inputs.component_name) }}
           component_overrides: "${{ inputs.component_id }}=${{ inputs.version }}"
@@ -94,7 +94,7 @@ jobs:
             **Run ID:** `${{ steps.release.outputs.run_id }}`
 
             ### 🔗 Release Link
-            [View Release in CloudBees Unify](https://cloudbees.io/cloudbees/8d16bd77-d506-45e6-a0f4-8884ce16d301/applications/e3925a1f-9165-4767-9d6e-a96bb4edc80a/releases/${{ steps.release.outputs.release_id }}?organizationId=8d16bd77-d506-45e6-a0f4-8884ce16d301)
+            [View Release in CloudBees Unify](https://cloudbees.io/cloudbees/11408510-e5d4-4d13-b1be-2c9b28f15aae/applications/d2de1f29-84da-4eb7-ae91-060d2665e752/releases/${{ steps.release.outputs.release_id }}?organizationId=11408510-e5d4-4d13-b1be-2c9b28f15aae)
 
       - name: Publish component selection evidence
         uses: cloudbees-io/publish-evidence-item@v1

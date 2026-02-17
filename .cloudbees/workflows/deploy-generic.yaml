@@ -175,7 +175,7 @@ jobs:
               fullnameOverride: ${{ inputs.component_name }}-postgresql   # stable DNS you can reference
               auth:
                 username: squid
-                password: "abcd1234"
+                password: ${{ secrets.KRAKEN_DB_PASSWORD }}   # set in Unify Secrets
                 database: squid_auth
               networkPolicy:
                 enabled: false

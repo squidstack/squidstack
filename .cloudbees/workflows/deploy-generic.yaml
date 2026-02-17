@@ -164,7 +164,7 @@ jobs:
             security:
               createSecret: true
               secretName: ${{ inputs.component_name }}-secrets
-              jwtSecret: ${{ toJSON(secrets.JWT_SECRET) }}
+              jwtSecret: ${{ secrets.JWT_SECRET }}
             # use bundled DB
             useExternalDb: false
 
@@ -176,7 +176,7 @@ jobs:
               fullnameOverride: ${{ inputs.component_name }}-postgresql   # stable DNS you can reference
               auth:
                 username: squid
-                password: ${{ toJSON(secrets.KRAKEN_DB_PASSWORD) }}   # set in Unify Secrets
+                password: ${{ secrets.KRAKEN_DB_PASSWORD }}   # set in Unify Secrets
                 database: squid_auth
               networkPolicy:
                 enabled: false

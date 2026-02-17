@@ -162,9 +162,8 @@ jobs:
               limits:   { cpu: 250m, memory: 256Mi }
             
             security:
-              createSecret: true
+              createSecret: false
               secretName: ${{ inputs.component_name }}-secrets
-              jwtSecret: ${{ secrets.JWT_SECRET }}
             # use bundled DB
             useExternalDb: false
 
@@ -195,8 +194,7 @@ jobs:
               enabled: ${{ inputs.feature_flags_enabled }}
               secretName: ${{ inputs.component_name }}-fmkey
               secretKey: ${{ inputs.feature_flags_secret_key }}
-              createSecret: ${{ inputs.feature_flags_create_secret }}
-              fmKey: ${{ secrets.FM_KEY }}
+              createSecret: false
             env:
               - name: FEATURE_ADMIN_HEALTH
                 value: ${{ inputs.feature_admin_health }}

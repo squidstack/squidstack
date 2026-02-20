@@ -95,7 +95,7 @@ jobs:
 
       - id: upload-binary
         name: Upload binary using action
-        uses: https://github.com/cloudbees-io/asset-chain-utils/upload-binary@v1
+        uses: https://github.com/cloudbees-io/asset-chain-utils-preprod/upload-binary@v1
         with:
           file-path: /workspace/container-image.tar
           file-type: BINARY_CONTAINER
